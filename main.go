@@ -27,6 +27,7 @@ func main() {
 		stripPrefixes  = false // don't print prefixes of ssm keys
 		showHistory    = false // print the history of a key
 		outputCSV      = false // output the ssm values to csv
+		secure         = false
 	)
 
 	app := cli.NewApp()
@@ -145,6 +146,12 @@ func main() {
 		{
 			Name:  "set",
 			Usage: "sets ssm k,v pair. overwrites. ex: ssm set /app/prod/version 27",
+			Flags: []cli.Flag{
+				cli.BoolFlag{
+					Name:        "secure",
+					Destination: &secure,
+				},
+			},
 			Action: func(c *cli.Context) error {
 				// create SSM session
 				cfg, err := config.LoadDefaultConfig(context.Background(), config.WithSharedConfigProfile(awsProfile))
@@ -155,7 +162,7 @@ func main() {
 				// set key value pair
 				key := c.Args().First()
 				val := c.Args().Get(1)
-				err = set(key, val, client)
+				err = set(key, val, secure, client)
 				return err
 			},
 		},
@@ -194,10 +201,13 @@ func rm(key string, client *ssm.Client) error {
 }
 
 // set sets a ssm key to a value.
-func set(key, val string, client *ssm.Client) error {
+func set(key, val string, secure bool, client *ssm.Client) error {
 
 	overwrite := true
-	ptype := types.ParameterTypeSecureString
+	ptype := types.ParameterTypeString
+	if secure {
+		ptype = types.ParameterTypeSecureString
+	}
 	tier := types.ParameterTierStandard
 	if len([]byte(val)) > 4096 {
 		tier = "Advanced"
@@ -217,6 +227,7 @@ type entry struct {
 	t       *time.Time
 	name    string
 	val     string
+	typ     string
 	history []string
 }
 
@@ -234,10 +245,11 @@ func (e *entry) fmt(ts, stripPrefix bool) []string {
 		name = e.name
 	}
 	h := strings.Join(e.history, ", ")
+	typ := fmt.Sprintf("%12s", e.typ)
 	if ts {
-		return []string{e.t.Format("2006-01-02 15:04:05"), name, e.val, h}
+		return []string{e.t.Format("2006-01-02 15:04:05"), typ, name, e.val, h}
 	}
-	return []string{name, e.val, h}
+	return []string{typ, name, e.val, h}
 }
 
 // history returns the parameter history of a value.
@@ -325,12 +337,12 @@ func list(s string, showValue, ts, stripPrefix, showHistory bool, client *ssm.Cl
 								log.Fatal(err)
 							}
 						}
-						resultChan <- entry{date, name, v, hist}
+						resultChan <- entry{date, name, v.val, v.typ, hist}
 
 						<-semChan
 					}()
 				} else {
-					resultChan <- entry{date, name, "", []string{}}
+					resultChan <- entry{date, name, "", "", []string{}}
 				}
 			}
 		}
@@ -369,17 +381,24 @@ func list(s string, showValue, ts, stripPrefix, showHistory bool, client *ssm.Cl
 	return vals, nil
 }
 
+type parameter struct {
+	val string
+	typ string
+}
+
 // get gets the value of a parameter.
-func get(key string, client *ssm.Client) (string, error) {
+func get(key string, client *ssm.Client) (parameter, error) {
 	withDecryption := true
 	param, err := client.GetParameter(context.Background(), &ssm.GetParameterInput{
 		Name:           &key,
 		WithDecryption: &withDecryption,
 	})
 	if err != nil {
-		return "", fmt.Errorf("error retrieving key %s: %w", key, err)
+		return parameter{}, fmt.Errorf("error retrieving key %s: %w", key, err)
 	}
 
-	value := *param.Parameter.Value
-	return value, nil
+	return parameter{
+		val: *param.Parameter.Value,
+		typ: string(param.Parameter.Type),
+	}, nil
 }
